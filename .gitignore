@@ -1,0 +1,23 @@
+# Data
+data/raw/
+data/processed/
+data/splits/
+
+# Experiments (checkpoints, logs, generated samples)
+experiments/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/

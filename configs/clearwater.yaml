@@ -1,0 +1,6 @@
+# Clearwater VNF dataset overrides
+_base_: default.yaml
+
+data:
+  raw_path: data/raw/X_126.csv
+  dataset_name: clearwater

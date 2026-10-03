@@ -1,0 +1,8 @@
+# Alibaba Cluster Trace 2018 overrides
+_base_: default.yaml
+
+data:
+  raw_path: data/raw/alibaba/
+  dataset_name: alibaba
+  n_vnfc: null        # variable — set per-trace
+  n_features: 2       # cpu_util, mem_util (Alibaba columns)

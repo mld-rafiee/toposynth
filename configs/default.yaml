@@ -1,0 +1,61 @@
+# TopoSynth default hyperparameters
+
+data:
+  raw_path: data/raw/X_126.csv
+  processed_path: data/processed/
+  seq_len: 48          # T: sliding window length (timesteps)
+  stride: 1            # sliding window stride
+  n_vnfc: 6            # N: number of VNFCs
+  n_features: 12       # F: features per VNFC
+  train_ratio: 0.80
+  val_ratio: 0.10
+  test_ratio: 0.10
+
+topology:
+  vnfcs: [bono, sprout, homestead, homer, ralf, ellis]
+  edges:             # directed: source -> target
+    - [bono, sprout]
+    - [sprout, homestead]
+    - [sprout, homer]
+    - [sprout, ralf]
+
+gat:
+  in_dim: 12         # F: input node feature dimension
+  hidden_dim: 64     # d_h
+  out_dim: 128       # d_z: topology embedding dimension
+  n_heads: 4         # K: attention heads
+  leaky_relu_slope: 0.2
+  dropout: 0.1
+
+diffusion:
+  n_steps: 200       # T_diff: diffusion timesteps
+  schedule: cosine   # noise schedule: cosine | linear
+  seq_len: 48
+  d_model: 128       # Transformer hidden dim
+  n_layers: 4        # Transformer encoder layers
+  n_heads: 8         # Transformer attention heads
+  d_ff: 256          # feedforward dim
+  lambda1: 1.0       # time-domain loss weight
+  lambda2: 1.0       # frequency-domain loss weight
+  top_k_freq: 3      # top-K Fourier components for seasonal
+
+conditioning:
+  eta: 0.1           # guidance strength
+  gamma: 0.01        # log-likelihood weight
+
+training:
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  epochs: 100
+  grad_clip: 1.0
+  val_every: 5       # validate every N epochs
+  save_every: 10
+  device: cuda       # cuda | cpu
+  seed: 42
+  experiment_dir: experiments/
+
+evaluation:
+  n_synthetic: 5000  # number of synthetic windows to generate
+  tstr_epochs: 50
+  granger_lag: 3
