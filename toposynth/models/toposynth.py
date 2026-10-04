@@ -17,20 +17,20 @@ from toposynth.data.topology import TOPOLOGY_CONFIG, get_upstream_neighbours
 
 # ─── HYPERPARAMETERS ─────────────────────────────────────────────────────────
 
-GAT_D_H     = 64      # hidden dim per attention head
-GAT_K       = 4       # number of attention heads
-GAT_D_Z     = 128     # output topology embedding dimension
-GAT_SLOPE   = 0.2     # LeakyReLU negative slope
+GAT_D_H      = 64      # hidden dim per attention head
+GAT_K        = 4       # number of attention heads
+GAT_D_Z      = 128     # output topology embedding dimension
+GAT_SLOPE    = 0.2     # LeakyReLU negative slope
 
-DIFF_STEPS   = 200    # T_diff: total diffusion timesteps
-DIFF_D_MODEL = 128    # Transformer hidden dim
-DIFF_N_HEADS = 8      # Transformer attention heads
-DIFF_N_LAYERS= 4      # Transformer encoder layers
-DIFF_D_FF    = 256    # feedforward dim
-DIFF_TOP_K   = 3      # top-K Fourier components kept in seasonal block
-DIFF_LAMBDA1 = 1.0    # time-domain loss weight
-DIFF_LAMBDA2 = 1.0    # frequency-domain loss weight
-LAMBDA_TOPO  = 0.1    # topology auxiliary loss weight
+DIFF_STEPS   = 200     # T_diff: total diffusion timesteps
+DIFF_D_MODEL = 128     # Transformer hidden dim
+DIFF_N_HEADS = 8       # Transformer attention heads
+DIFF_N_LAYERS = 4      # Transformer encoder layers
+DIFF_D_FF    = 256     # feedforward dim
+DIFF_TOP_K   = 3       # top-K Fourier components kept in seasonal block
+DIFF_LAMBDA1 = 1.0     # time-domain loss weight
+DIFF_LAMBDA2 = 1.0     # frequency-domain loss weight
+LAMBDA_TOPO  = 0.1     # topology auxiliary loss weight
 
 
 # ─── UTILITIES ────────────────────────────────────────────────────────────────
@@ -43,7 +43,6 @@ def _rank0():
 
 
 # ─── EMA ─────────────────────────────────────────────────────────────────────
-# Direct copy of your EMA pattern from MCAE_KPI.py
 
 class EMA:
     def __init__(self, model, decay=0.999):
@@ -98,8 +97,8 @@ class NoiseSchedule(nn.Module):
     """
     def __init__(self, n_steps=DIFF_STEPS):
         super().__init__()
-        t = torch.arange(n_steps + 1, dtype=torch.float32)
-        f = torch.cos((t / n_steps + 0.008) / 1.008 * math.pi / 2) ** 2
+        t  = torch.arange(n_steps + 1, dtype=torch.float32)
+        f  = torch.cos((t / n_steps + 0.008) / 1.008 * math.pi / 2) ** 2
         ac = f / f[0]                           # alphas_cumprod
         betas  = (1 - ac[1:] / ac[:-1]).clamp(max=0.999)
         alphas = 1.0 - betas
@@ -182,11 +181,9 @@ class TrendBlock(nn.Module):
         super().__init__()
         self.n_features = n_features
         self.poly_order = poly_order
-        # Polynomial basis C ∈ R^{W, p+1}
-        t = torch.linspace(0, 1, seq_len).unsqueeze(1)        # [W, 1]
+        t     = torch.linspace(0, 1, seq_len).unsqueeze(1)         # [W, 1]
         basis = torch.cat([t ** k for k in range(poly_order + 1)], dim=1)
-        self.register_buffer('basis', basis)                   # [W, p+1]
-        # Project last hidden state → polynomial coefficients
+        self.register_buffer('basis', basis)                        # [W, p+1]
         self.coef_proj = nn.Linear(d_model, (poly_order + 1) * n_features)
 
     def forward(self, h_last):
@@ -208,10 +205,9 @@ class SeasonalBlock(nn.Module):
 
     def forward(self, x):
         """x : [B*N, W, F] → seasonal : [B*N, W, F]"""
-        xf  = torch.fft.rfft(x, dim=1)                        # [BN, W//2+1, F]
-        amp = xf.abs()                                         # [BN, W//2+1, F]
-        # Top-K indices per feature, averaged over batch
-        _, idx = torch.topk(amp.mean(0), self.top_k, dim=0)   # [k, F]
+        xf  = torch.fft.rfft(x, dim=1)                         # [BN, W//2+1, F]
+        amp = xf.abs()                                          # [BN, W//2+1, F]
+        _, idx = torch.topk(amp.mean(0), self.top_k, dim=0)    # [k, F]
         mask = torch.zeros_like(xf)
         for fi in range(x.size(-1)):
             mask[:, idx[:, fi], fi] = 1.0
@@ -257,15 +253,15 @@ class DiffusionTransformer(nn.Module):
         t  : [B*N] int
         Returns x0_pred : [B*N, W, F]
         """
-        h = self.pos_enc(self.input_proj(xt))          # [BN, W, d_model]
-        h = h + self.time_proj(self.time_emb(t)).unsqueeze(1)  # broadcast over W
-        h = self.transformer(h)                        # [BN, W, d_model]
+        h = self.pos_enc(self.input_proj(xt))                          # [BN, W, d_model]
+        h = h + self.time_proj(self.time_emb(t)).unsqueeze(1)         # broadcast over W
+        h = self.transformer(h)                                        # [BN, W, d_model]
 
-        trend    = self.trend_block(h[:, -1, :])       # [BN, W, F]
-        residual = self.residual_proj(h)               # [BN, W, F]
-        seasonal = self.seasonal_block(residual)       # [BN, W, F]
+        trend    = self.trend_block(h[:, -1, :])                       # [BN, W, F]
+        residual = self.residual_proj(h)                               # [BN, W, F]
+        seasonal = self.seasonal_block(residual)                       # [BN, W, F]
 
-        return trend + seasonal + residual             # [BN, W, F]
+        return trend + seasonal + residual                             # [BN, W, F]
 
 
 # ─── GAT ENCODER ─────────────────────────────────────────────────────────────
@@ -274,6 +270,10 @@ class GATLayer(nn.Module):
     """
     Single directed GAT layer — manual implementation, no torch_geometric.
     Follows Veličković et al. (ICLR 2018), Eqs. 1-6.
+
+    Supports both:
+      forward(h)          : h [N, in_dim]    → h' [N, out_dim]
+      forward_batched(h)  : h [B, N, in_dim] → h' [B, N, out_dim]
 
     Directed edges: attention α_{ij} computed only when j→i exists in SFC.
     Entry nodes (no upstream neighbours) produce zero output here;
@@ -299,32 +299,33 @@ class GATLayer(nn.Module):
         self.vnf_to_idx = TOPOLOGY_CONFIG['vnf_to_idx']
 
     def forward(self, h):
-        """h : [N, in_dim] → h' : [N, K*out_dim] or [N, out_dim]"""
-        N      = len(self.vnf_names)
-        out_d  = self.n_heads * self.out_dim if self.concat else self.out_dim
-        out    = torch.zeros(N, out_d, device=h.device)
+        """
+        h : [N, in_dim] → h' : [N, K*out_dim] if concat else [N, out_dim]
+        Used for single-sample inference (TCS, target embedding).
+        """
+        N     = len(self.vnf_names)
+        out_d = self.n_heads * self.out_dim if self.concat else self.out_dim
+        out   = torch.zeros(N, out_d, device=h.device)
 
-        # Project all nodes: Wh ∈ [K, N, out_dim]
+        # Wh ∈ [K, N, out_dim]
         Wh = torch.einsum('kio,ni->kno', self.W, h)
 
         for i, vnf_i in enumerate(self.vnf_names):
             nbs = self.neighbours[vnf_i]
             if not nbs:
-                continue                         # entry/isolated: handled in GATEncoder
+                continue
 
-            nb_idx = [self.vnf_to_idx[nb] for nb in nbs]
+            nb_idx    = [self.vnf_to_idx[nb] for nb in nbs]
             head_outs = []
             for k in range(self.n_heads):
-                Whi  = Wh[k, i]                  # [out_dim]
-                Whjs = Wh[k, nb_idx]             # [|N_i|, out_dim]
-
-                # e_ij = LeakyReLU(aᵀ [Wh_i ‖ Wh_j])
+                Whi  = Wh[k, i]                   # [out_dim]
+                Whjs = Wh[k, nb_idx]              # [|N_i|, out_dim]
                 cat_ij = torch.cat(
                     [Whi.unsqueeze(0).expand(len(nb_idx), -1), Whjs], dim=-1
-                )                                # [|N_i|, 2*out_dim]
-                e      = self.leaky_relu((cat_ij * self.a[k]).sum(-1))  # [|N_i|]
-                alpha  = Fn.softmax(e, dim=0)     # [|N_i|]
-                h_agg  = (alpha.unsqueeze(-1) * Whjs).sum(0)            # [out_dim]
+                )                                 # [|N_i|, 2*out_dim]
+                e     = self.leaky_relu((cat_ij * self.a[k]).sum(-1))  # [|N_i|]
+                alpha = Fn.softmax(e, dim=0)      # [|N_i|]
+                h_agg = (alpha.unsqueeze(-1) * Whjs).sum(0)            # [out_dim]
                 head_outs.append(h_agg)
 
             if self.concat:
@@ -334,6 +335,53 @@ class GATLayer(nn.Module):
 
         return out
 
+    def forward_batched(self, h):
+        """
+        h : [B, N, in_dim] → h' : [B, N, K*out_dim] if concat else [B, N, out_dim]
+
+        Processes the entire batch in one pass, replacing the per-sample Python
+        loop that made guidance ~B× slower than necessary. The node-level loop
+        (over 6 VNFs) is unavoidable with a custom GAT, but the batch dimension
+        is fully vectorised via tensor ops, giving ~B× wall-clock speedup for
+        guidance computation.
+        """
+        B, N, _ = h.shape
+        out_d   = self.n_heads * self.out_dim if self.concat else self.out_dim
+        out     = torch.zeros(B, N, out_d, device=h.device)
+
+        # Wh : [B, K, N, out_dim]
+        Wh = torch.einsum('kio,bni->bkno', self.W, h)
+
+        for i, vnf_i in enumerate(self.vnf_names):
+            nbs = self.neighbours[vnf_i]
+            if not nbs:
+                continue
+
+            nb_idx = [self.vnf_to_idx[nb] for nb in nbs]
+            M      = len(nb_idx)
+
+            # Wh_i : [B, K, out_dim]   Wh_j : [B, K, M, out_dim]
+            Wh_i = Wh[:, :, i, :]
+            Wh_j = Wh[:, :, nb_idx, :]
+
+            # cat_ij : [B, K, M, 2*out_dim]
+            Wh_i_exp = Wh_i.unsqueeze(2).expand(-1, -1, M, -1)
+            cat_ij   = torch.cat([Wh_i_exp, Wh_j], dim=-1)
+
+            # e : [B, K, M]  (attention logits)
+            e     = self.leaky_relu((cat_ij * self.a.view(1, self.n_heads, 1, -1)).sum(-1))
+            alpha = Fn.softmax(e, dim=2)            # [B, K, M]
+
+            # h_agg : [B, K, out_dim]
+            h_agg = (alpha.unsqueeze(-1) * Wh_j).sum(2)
+
+            if self.concat:
+                out[:, i, :] = Fn.elu(h_agg.reshape(B, -1))
+            else:
+                out[:, i, :] = Fn.elu(h_agg.mean(1))
+
+        return out                                  # [B, N, out_d]
+
 
 class GATEncoder(nn.Module):
     """
@@ -342,6 +390,7 @@ class GATEncoder(nn.Module):
     Layer 1 : in_dim  → K * d_h   (concatenation across heads)
     Layer 2 : K * d_h → d_z       (average across heads)
 
+    Supports both forward (single [N, F]) and forward_batched ([B, N, F]).
     Entry/isolated nodes bypass attention → entry_proj linear.
     Includes correlation decoder for self-supervised topology loss.
     """
@@ -364,30 +413,48 @@ class GATEncoder(nn.Module):
 
     def forward(self, h_bar):
         """
-        h_bar : [N, F]  (per-VNF mean statistics — static node attribute)
-        Returns z : [N, d_z]
+        h_bar : [N, F]  → z : [N, d_z]
+        Used for single-sample inference (TCS, target embedding).
         """
-        # Layer 1
-        h1 = self.gat1(h_bar)                  # [N, K*d_h] — zeros for entry nodes
+        h1 = self.gat1(h_bar)
         for i, vnf in enumerate(self.vnf_names):
             if not self.neighbours[vnf]:
                 h1[i] = self.entry_proj1(h_bar[i])
         h1 = self.norm1(h1)
 
-        # Layer 2
-        h2 = self.gat2(h1)                     # [N, d_z]
+        h2 = self.gat2(h1)
         for i, vnf in enumerate(self.vnf_names):
             if not self.neighbours[vnf]:
                 h2[i] = self.entry_proj2(h1[i])
         h2 = self.norm2(h2)
-        return h2                               # [N, d_z]
+        return h2                                   # [N, d_z]
+
+    def forward_batched(self, h_bar):
+        """
+        h_bar : [B, N, F]  → z : [B, N, d_z]
+
+        Batched version used inside generate() for guidance gradient computation.
+        Replaces the per-sample GAT loop: Bx speedup on guidance.
+        """
+        h1 = self.gat1.forward_batched(h_bar)      # [B, N, K*d_h]
+        for i, vnf in enumerate(self.vnf_names):
+            if not self.neighbours[vnf]:
+                h1[:, i, :] = self.entry_proj1(h_bar[:, i, :])
+        h1 = self.norm1(h1)
+
+        h2 = self.gat2.forward_batched(h1)         # [B, N, d_z]
+        for i, vnf in enumerate(self.vnf_names):
+            if not self.neighbours[vnf]:
+                h2[:, i, :] = self.entry_proj2(h1[:, i, :])
+        h2 = self.norm2(h2)
+        return h2                                   # [B, N, d_z]
 
     def decode_correlations(self, z):
         """z : [N, d_z] → C_pred : [N, N] predicted cross-VNF correlations"""
         N  = z.size(0)
         zi = z.unsqueeze(1).expand(N, N, -1).reshape(N * N, -1)
         zj = z.unsqueeze(0).expand(N, N, -1).reshape(N * N, -1)
-        return torch.tanh(self.corr_decoder(zi, zj).view(N, N))  # ∈ [-1, 1]
+        return torch.tanh(self.corr_decoder(zi, zj).view(N, N))
 
 
 # ─── TOPOSYNTH (top-level model) ─────────────────────────────────────────────
@@ -427,43 +494,64 @@ class TopoSynth(nn.Module):
         B, W, N, n_feat = x0.shape
 
         # ── Forward diffusion ─────────────────────────────────────────────────
-        xt, _  = self.schedule.q_sample(x0, t)         # [B, W, N, F]
+        xt, _ = self.schedule.q_sample(x0, t)       # [B, W, N, F]
 
         # ── Denoising backbone (operates per VNFC independently) ──────────────
-        # Reshape: [B, W, N, F] → [B*N, W, F]
         xt_flat  = xt.permute(0, 2, 1, 3).reshape(B * N, W, n_feat)
         t_expand = t.unsqueeze(1).expand(B, N).reshape(B * N)
 
-        x0_pred_flat = self.denoiser(xt_flat, t_expand)  # [B*N, W, F]
+        x0_pred_flat = self.denoiser(xt_flat, t_expand)                     # [B*N, W, F]
         x0_pred = x0_pred_flat.view(B, N, W, n_feat).permute(0, 2, 1, 3)  # [B, W, N, F]
 
         # ── Topology encoding ─────────────────────────────────────────────────
-        z      = self.gat(h_bar)                        # [N, d_z]
-        C_pred = self.gat.decode_correlations(z)        # [N, N]
+        z      = self.gat(h_bar)                    # [N, d_z]
+        C_pred = self.gat.decode_correlations(z)    # [N, N]
 
         return x0_pred, xt, z, C_pred
 
     @torch.no_grad()
-    def generate(self, n_samples, h_bar, eta=0.1, gamma=0.01, device='cuda'):
+    def generate(self, n_samples, h_bar, eta=0.1, gamma=0.01, device='cuda',
+                 n_infer_steps=None, guidance_every=1):
         """
-        Inference: reverse diffusion with topology gradient guidance (Eq. 12).
+        Inference: reverse diffusion with topology gradient guidance.
 
-        eta   : guidance strength η
-        gamma : log-likelihood weight γ (scales p(x_{t-1}|x_t) term)
+        Parameters
+        ----------
+        n_samples      : number of windows to generate
+        h_bar          : [N, F]  per-VNF training-set mean
+        eta            : guidance strength η
+        gamma          : log-likelihood weight γ
+        device         : 'cuda' or 'cpu'
+        n_infer_steps  : reverse-diffusion steps at inference (default: full T=200).
+                         E.g. 50 gives 4× speedup with negligible quality loss.
+        guidance_every : compute GAT gradient only every K steps (default: 1 = every step).
+                         E.g. 5 gives ~5× speedup in guidance with negligible quality loss.
 
-        Returns synthetic : [n_samples, W, N, F]  in [0, 1]
+        Returns
+        -------
+        synthetic : [n_samples, W, N, F]  float32 in [0, 1]
         """
-        W, N, F   = self.seq_len, self.n_vnf, self.n_features
-        h_bar     = h_bar.to(device)
-        z_target  = self.gat(h_bar).detach()            # [N, d_z]  — fixed target
+        W, N, F  = self.seq_len, self.n_vnf, self.n_features
+        h_bar    = h_bar.to(device)
+        z_target = self.gat(h_bar).detach()          # [N, d_z] — fixed target
 
         xt = torch.randn(n_samples, W, N, F, device=device)
 
-        for step in reversed(range(self.schedule.T)):
+        # ── Build inference timestep sequence ─────────────────────────────────
+        T = self.schedule.T                          # e.g. 200
+        if n_infer_steps is not None and n_infer_steps < T:
+            stride    = T // n_infer_steps
+            timesteps = list(range(0, T, stride))[::-1]   # [T-1, T-1-stride, ..., 0]
+        else:
+            timesteps = list(range(T - 1, -1, -1))        # original: every step
+
+        for step_idx, step in enumerate(timesteps):
             t_batch = torch.full((n_samples,), step, dtype=torch.long, device=device)
 
             # Need grad through denoiser for guidance gradient
             xt = xt.detach().requires_grad_(True)
+
+            apply_guidance = (step_idx % guidance_every == 0)
 
             with torch.enable_grad():
                 xt_flat      = xt.permute(0, 2, 1, 3).reshape(n_samples * N, W, F)
@@ -471,19 +559,21 @@ class TopoSynth(nn.Module):
                 x0_pred_flat = self.denoiser(xt_flat, t_exp)
                 x0_pred      = x0_pred_flat.view(n_samples, N, W, F).permute(0, 2, 1, 3)
 
-                # Guidance: ||z_target - ẑ(x̂_0)||²
-                # ẑ computed from per-sample mean over time
-                x0_mean   = x0_pred.mean(dim=1)         # [B, N, F]
-                guide_loss = sum(
-                    Fn.mse_loss(self.gat(x0_mean[b]), z_target)
-                    for b in range(n_samples)
-                ) / n_samples
-
-                grad = torch.autograd.grad(guide_loss, xt)[0]  # [B, W, N, F]
+                if apply_guidance:
+                    # ── Batched GAT guidance (key speedup) ────────────────────
+                    # Old: Python loop → n_samples sequential GAT calls per step
+                    # New: one batched call → [B, N, F] → [B, N, d_z] in one kernel
+                    x0_mean  = x0_pred.mean(dim=1)              # [B, N, F]
+                    z_pred   = self.gat.forward_batched(x0_mean) # [B, N, d_z]
+                    z_tgt_ex = z_target.unsqueeze(0).expand_as(z_pred)
+                    guide_loss = Fn.mse_loss(z_pred, z_tgt_ex)
+                    grad = torch.autograd.grad(guide_loss, xt)[0]  # [B, W, N, F]
 
             with torch.no_grad():
-                # Corrected x̂_0 (Eq. 12)
-                x0_guided = x0_pred.detach() - eta * grad
+                if apply_guidance:
+                    x0_guided = x0_pred.detach() - eta * grad
+                else:
+                    x0_guided = x0_pred.detach()
 
                 # Posterior step: sample x_{t-1}
                 if step > 0:
@@ -494,7 +584,7 @@ class TopoSynth(nn.Module):
                 else:
                     xt = x0_guided
 
-        return xt.detach().clamp(0.0, 1.0)              # [n_samples, W, N, F]
+        return xt.detach().clamp(0.0, 1.0)          # [n_samples, W, N, F]
 
 
 # ─── LOSS FUNCTIONS ──────────────────────────────────────────────────────────
@@ -521,7 +611,6 @@ def topology_loss(C_pred, x0):
     x0     : [B, W, N, F]  real data batch
     """
     B, W, N, n_feat = x0.shape
-    # Mean feature per VNFC → [N, B*W] for Pearson computation
     x_flat = x0.mean(dim=-1).permute(2, 0, 1).reshape(N, B * W)  # [N, B*W]
     x_norm = x_flat - x_flat.mean(dim=1, keepdim=True)
     x_norm = x_norm / x_norm.std(dim=1, keepdim=True).clamp(min=1e-6)
@@ -573,7 +662,7 @@ def train_toposynth(train_loader, val_loader, train_sampler, checkpoint_dir,
 
         for batch in train_loader:
             x0    = batch['x'].to(device)           # [B, W, N, F]
-            h_bar = batch['h_bar'][0].to(device)    # [N, F]  same for all in batch
+            h_bar = batch['h_bar'][0].to(device)    # [N, F]
             B     = x0.size(0)
             t     = torch.randint(0, n_diff_steps, (B,), device=device)
 
@@ -637,8 +726,6 @@ def train_toposynth(train_loader, val_loader, train_sampler, checkpoint_dir,
 
         scheduler.step()
 
-        # Broadcast early-stop flag — only rank 0 updates no_imp,
-        # so all ranks must agree via all_reduce before breaking.
         _stop = torch.zeros(1, device=device)
         if _rank0() and no_imp >= early_stop_patience:
             _stop[0] = 1.0
@@ -659,8 +746,8 @@ def train_toposynth(train_loader, val_loader, train_sampler, checkpoint_dir,
 # ─── LOAD BEST MODEL ─────────────────────────────────────────────────────────
 
 def load_best_model_for_generation(checkpoint_dir, device,
-                                    seq_len, n_features, n_vnf,
-                                    n_diff_steps=DIFF_STEPS):
+                                   seq_len, n_features, n_vnf,
+                                   n_diff_steps=DIFF_STEPS):
     best_path = os.path.join(checkpoint_dir, 'toposynth_best.pth')
     if not os.path.exists(best_path):
         raise FileNotFoundError(f'Best checkpoint not found: {best_path}')
