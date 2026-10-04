@@ -15,10 +15,15 @@ data:
 topology:
   vnfcs: [bono, sprout, homestead, homer, ralf, ellis]
   edges:                            # directed: source -> target
+    # SIP call-flow path
     - [bono, sprout]
     - [sprout, homestead]
     - [sprout, homer]
     - [sprout, ralf]
+    - [bono, ralf]
+    # provisioning / management plane (ellis is NOT isolated)
+    - [ellis, homestead]
+    - [ellis, homer]
 
 gat:
   in_dim: 12                        # F: input node feature dimension
@@ -28,7 +33,7 @@ gat:
   leaky_relu_slope: 0.2
   dropout: 0.1
 
-model:                              # NEW section — train.py reads cfg["model"]
+model:                              # train.py reads cfg["model"]
   n_diff_steps: 200                 # was buried in diffusion.n_steps; unreachable
 
 diffusion:                          # kept for any code that reads diffusion: directly
@@ -43,7 +48,7 @@ diffusion:                          # kept for any code that reads diffusion: di
   lambda2: 1.0                      # frequency-domain loss weight
   top_k_freq: 3                     # top-K Fourier components for seasonal
 
-conditioning:                       # kept for reference; values now mirrored in training:
+conditioning:                       # kept for reference; values mirrored in training:
   eta: 0.1
   gamma: 0.01
 
@@ -51,13 +56,14 @@ training:
   batch_size: 64
   lr: 1.0e-4
   weight_decay: 1.0e-6
-  n_epochs: 96                     # was: epochs  (train.py reads n_epochs)
-  patience: 20                      # NEW — early stopping patience
-  checkpoint_dir: checkpoints       # NEW
-  log_dir: logs                     # NEW
-  resume: true                      # NEW — load toposynth_resume.pth if it exists
-  lambda_topo: 0.1                  # NEW — topology loss weight
-  guidance_eta: 0.1                 # was: conditioning.eta  (train.py reads training.guidance_eta)
+  n_epochs: 96                      # train.py reads n_epochs
+  patience: 20                      # early stopping patience
+  checkpoint_dir: checkpoints
+  log_dir: logs
+  resume: false                     # false = train from scratch with corrected topology;
+                                    # set true after retraining to resume from best checkpoint
+  lambda_topo: 0.1                  # topology loss weight
+  guidance_eta: 0.1                 # was: conditioning.eta
   guidance_gamma: 0.01              # was: conditioning.gamma
   grad_clip: 1.0
   val_every: 5                      # validate every N epochs
@@ -67,6 +73,9 @@ training:
   experiment_dir: experiments/
 
 evaluation:
-  n_synthetic: 5000                 # number of synthetic windows to generate
+  n_synthetic: 500                  # windows to generate (use 5000 for paper run)
+  n_infer_steps: 50                 # reverse diffusion steps at inference (< 200 = faster)
+  guidance_every: 5                 # apply GAT gradient every K steps (5× speedup)
   tstr_epochs: 50
   granger_lag: 3
+  
