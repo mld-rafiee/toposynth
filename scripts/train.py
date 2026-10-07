@@ -1,6 +1,10 @@
 """
 scripts/train.py — Main DDP entry point for TopoSynth training.
 Called via: torchrun --nnodes=1 --nproc_per_node=N scripts/train.py [--config PATH]
+
+FIX (2026-10): reads the `topology` section from the config YAML and passes
+topology_config to train_toposynth / load_best_model_for_generation, so
+SFC (and any future dataset) is trained on its own graph, not Clearwater's.
 """
 
 import os
@@ -70,6 +74,38 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def build_topology_config(cfg: dict) -> dict | None:
+    """
+    Read the `topology` section of the config YAML and return a topology_config
+    dict ready for GATLayer/GATEncoder/TopoSynth.
+
+    YAML shape expected:
+        topology:
+          vnfcs: [firewall, dpi, enc, comp, firewall2, nat]
+          edges:
+            - [firewall, dpi]
+            - [dpi, enc]
+            ...
+
+    Returns None if the section is absent (falls back to Clearwater default).
+    """
+    topo_cfg  = cfg.get("topology", {})
+    vnf_names = topo_cfg.get("vnfcs", [])
+    if not vnf_names:
+        return None   # no topology section → use module-level TOPOLOGY_CONFIG
+
+    raw_edges = topo_cfg.get("edges", [])
+    # edges may be [[src, dst], ...] — normalise to list of (str, str) tuples
+    edges = [(str(e[0]), str(e[1])) for e in raw_edges]
+
+    return {
+        "vnf_names":  [str(v) for v in vnf_names],
+        "vnf_to_idx": {str(v): i for i, v in enumerate(vnf_names)},
+        "edges":      edges,
+        "n_vnf":      len(vnf_names),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -115,6 +151,22 @@ def main() -> None:
     lr           = train_cfg.get("lr",          1e-4)
     patience     = train_cfg.get("patience",      20)
 
+    # ---- Topology config --------------------------------------------------
+    # Build from the `topology:` section of the YAML.
+    # For configs/default.yaml (Clearwater) this section already exists;
+    # for configs/sfc.yaml it is the SFC graph.
+    # If the section is absent, build_topology_config returns None and the
+    # model falls back to the Clearwater module-level default.
+    topology_config = build_topology_config(cfg)
+    if global_rank == 0:
+        if topology_config is not None:
+            logger.info(
+                f"Topology: {topology_config['vnf_names']}  "
+                f"({len(topology_config['edges'])} directed edges)"
+            )
+        else:
+            logger.info("No topology section in config — using Clearwater default")
+
     # ---- Preprocessing (rank 0 only, then barrier) -----------------------
     proc_data_file = os.path.join(proc_data_dir, "data_scaled.npy")
 
@@ -159,11 +211,6 @@ def main() -> None:
     )
 
     # ---- Training --------------------------------------------------------
-    # train_toposynth signature:
-    #   train_toposynth(train_loader, val_loader, train_sampler, checkpoint_dir,
-    #                   seq_len, n_features, n_vnf,
-    #                   n_epochs, lr, weight_decay, lambda_topo,
-    #                   early_stop_patience, resume, n_diff_steps)
     logger.info("Starting train_toposynth …")
     train_toposynth(
         train_loader=train_loader,
@@ -180,8 +227,8 @@ def main() -> None:
         early_stop_patience=patience,
         resume=train_cfg.get("resume", True),
         n_diff_steps=n_diff_steps,
+        topology_config=topology_config,   # ← THE FIX: pass dataset topology
     )
-
 
     # ---- Cleanup (ALL ranks before generation) ---------------------------
     # Must happen before the rank-0-only block below; otherwise ranks 1 & 2
@@ -191,10 +238,6 @@ def main() -> None:
     # ---- Post-training: quick sanity generation on rank 0 ---------------
     if global_rank == 0:
         logger.info("Training complete. Loading best model for generation …")
-        # load_best_model_for_generation signature:
-        #   load_best_model_for_generation(checkpoint_dir, device,
-        #                                  seq_len, n_features, n_vnf,
-        #                                  n_diff_steps)
         model = load_best_model_for_generation(
             checkpoint_dir=checkpoint_dir,
             device=device,
@@ -202,11 +245,10 @@ def main() -> None:
             n_features=n_features,
             n_vnf=n_vnf,
             n_diff_steps=n_diff_steps,
+            topology_config=topology_config,  # ← also passed here; checkpoint takes priority
         )
         model.eval()
 
-        # h_bar: per-VNF training-set mean [N, F]
-        # generate() signature: generate(n_samples, h_bar, eta, gamma, device)
         import numpy as np
         h_bar = torch.FloatTensor(data[:tsi].mean(axis=0)).to(device)
 
