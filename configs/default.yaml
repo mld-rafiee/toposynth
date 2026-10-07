@@ -14,16 +14,37 @@ data:
 
 topology:
   vnfcs: [bono, sprout, homestead, homer, ralf, ellis]
-  edges:                            # directed: source -> target
-    # SIP call-flow path
+  edges:                            # 14 directed edges — both directions per documented link
+    # Each pair modelled as two independent directed channels:
+    # traffic volume, timing and packet counts differ by direction.
+    # Source: Project Clearwater Architecture documentation.
+    # The dataset provides node-level in/out telemetry, NOT per-edge
+    # flow records; topology is architecture-derived (see §4 of paper).
+
+    # SIP signaling (Bono is SIP edge proxy; remains on signaling path)
     - [bono, sprout]
+    - [sprout, bono]
+
+    # Subscriber authentication / HSS cache (Sprout ↔ Homestead web services)
     - [sprout, homestead]
+    - [homestead, sprout]
+
+    # MMTEL service settings (Sprout ↔ Homer XCAP interface)
     - [sprout, homer]
-    - [sprout, ralf]
+    - [homer, sprout]
+
+    # Charging / billing (Bono and Sprout report billable events to Ralf)
     - [bono, ralf]
-    # provisioning / management plane (ellis is NOT isolated)
+    - [ralf, bono]
+    - [sprout, ralf]
+    - [ralf, sprout]
+
+    # Provisioning (Ellis uses Homer and Homestead-Prov services)
+    # Note: 'homestead' here abstracts the Homestead-Prov API endpoint
     - [ellis, homestead]
+    - [homestead, ellis]
     - [ellis, homer]
+    - [homer, ellis]
 
 gat:
   in_dim: 12                        # F: input node feature dimension
@@ -56,8 +77,8 @@ training:
   batch_size: 64
   lr: 1.0e-4
   weight_decay: 1.0e-6
-  n_epochs: 96                      # train.py reads n_epochs
-  patience: 20                      # early stopping patience
+  n_epochs: 400                      # train.py reads n_epochs
+  patience: 40                      # early stopping patience
   checkpoint_dir: checkpoints
   log_dir: logs
   resume: false                     # false = train from scratch with corrected topology;

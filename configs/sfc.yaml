@@ -1,0 +1,86 @@
+# TopoSynth — SFC dataset (vnf-sfc-monitoring)
+# VNF_KPI_database_crash_top2_v2_statefull_7May.db
+#
+# Two Service Function Chains sharing a DPI node:
+#   SFC1: firewall → dpi → enc → comp
+#   SFC2: firewall2 → dpi → nat
+#
+# 6 VNFs × 5 features = 30-dimensional per-timestep observation.
+
+data:
+  raw_path: data/raw/VNF_KPI_database_crash_top2_v2_statefull_7May.db
+  processed_dir: data/processed_sfc
+  seq_len: 48                       # T: sliding window length (timesteps)
+  stride: 1
+  n_vnf: 6
+  n_features: 5                     # cpu_usage, memory_usage, processing_delay,
+                                    # traffic_rate, crash
+  train_ratio: 0.80
+  val_ratio: 0.10
+  test_ratio: 0.10
+  num_workers: 4
+
+topology:
+  vnfcs: [firewall, dpi, enc, comp, firewall2, nat]
+  edges:
+    # SFC1: Firewall → DPI → Encryption → Compression
+    - [firewall,  dpi]
+    - [dpi,       enc]
+    - [enc,       comp]
+
+    # SFC2: Firewall2 → DPI → NAT
+    # DPI is shared: both SFC1 and SFC2 traffic flows through it.
+    - [firewall2, dpi]
+    - [dpi,       nat]
+
+    # Note: no reverse edges — these are unidirectional packet-processing
+    # chains; downstream VNFs do not signal back to upstream ones.
+
+gat:
+  in_dim: 5                         # F: matches n_features
+  hidden_dim: 64
+  out_dim: 128                      # d_z: topology embedding dimension
+  n_heads: 4
+  leaky_relu_slope: 0.2
+  dropout: 0.1
+
+model:
+  n_diff_steps: 200
+
+diffusion:
+  n_steps: 200
+  schedule: cosine
+  seq_len: 48
+  d_model: 128
+  n_layers: 4
+  n_heads: 8
+  d_ff: 256
+  lambda1: 1.0
+  lambda2: 1.0
+  top_k_freq: 3
+
+training:
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  n_epochs: 400
+  patience: 60
+  checkpoint_dir: checkpoints_sfc
+  log_dir: logs_sfc
+  resume: false
+  lambda_topo: 1.0       # was 0.1 — stronger topology signal with fixed-target loss
+  guidance_eta: 0.5      # was 0.1 — stronger guidance correction at inference
+  guidance_gamma: 0.1    # was 0.01
+  grad_clip: 1.0
+  val_every: 5
+  save_every: 10
+  device: cuda
+  seed: 42
+  experiment_dir: experiments_sfc/
+
+evaluation:
+  n_synthetic: 500
+  n_infer_steps: 50
+  guidance_every: 5
+  tstr_epochs: 50
+  granger_lag: 3

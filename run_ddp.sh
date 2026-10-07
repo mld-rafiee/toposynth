@@ -20,6 +20,11 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-3}"          # number of GPUs per node
 # ---- Optional config override ------------------------------------------
 CONFIG="${CONFIG:-configs/default.yaml}"
 
+# topology.py builds TOPOLOGY_CONFIG at import time from this env var.
+# Without it, every run uses configs/default.yaml (Clearwater) regardless
+# of --config, so SFC training gets Clearwater's 14-edge GAT topology.
+export TOPOSYNTH_CONFIG="${REPO_ROOT}/${CONFIG}"
+
 echo "============================================================"
 echo " TopoSynth DDP training"
 echo "   MASTER_ADDR    = ${MASTER_ADDR}"

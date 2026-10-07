@@ -7,6 +7,8 @@ Metrics implemented (matching Diffusion-TS ICLR-2024 + TopoSynth extensions):
   3. Context-FID           (CFID)  ↓  FID in ts2vec embedding space (BiGRU fallback)
   4. Correlational Score   (CS)    ↓  MAE of cross-correlation matrices
   5. Topology Consistency  (TCS)   ↓  GAT-embedding MSE / ↑ cosine (TopoSynth-specific)
+  6. Granger Causal Score  (GCS)   ↑  agreement rate on Granger-causal decisions
+                                       between real and synthetic (TopoSynth-specific)
 
 All metrics repeated `--repeats` times (default 5) to reduce variance;
 DS and PS report the mean over repeats.
@@ -24,6 +26,8 @@ References
 - Diffusion-TS (ICLR 2024): Context-FID, Correlational Score, DS, PS
 - TSGBench (VLDB 2023): DS/PS LSTM architecture, evaluation protocol
 - PaD-TS (AAAI 2025): additional discriminative/predictive framing
+- Granger (1969): original causality test; F-test implementation follows
+  Lütkepohl (2005) §2.3 (bivariate OLS, unrestricted vs restricted VAR)
 """
 
 import os
@@ -56,10 +60,11 @@ except ImportError:
 
 try:
     from scipy.linalg import sqrtm as mat_sqrtm
+    from scipy.stats import f as f_dist
     HAS_SCIPY = True
 except ImportError:
     HAS_SCIPY = False
-    print("[evaluate] WARNING: scipy not found — Context-FID will be skipped.")
+    print("[evaluate] WARNING: scipy not found — Context-FID and GCS will be skipped.")
 
 # ── logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -166,7 +171,7 @@ def _compute_fid(mu1: np.ndarray, sig1: np.ndarray,
                  mu2: np.ndarray, sig2: np.ndarray) -> float:
     """Fréchet distance between N(mu1,sig1) and N(mu2,sig2)."""
     diff     = mu1 - mu2
-    cov_mean = mat_sqrtm(sig1 @ sig2)   # disp kwarg removed (deprecated in scipy 1.18)
+    cov_mean = mat_sqrtm(sig1 @ sig2)
     if np.iscomplexobj(cov_mean):
         cov_mean = cov_mean.real
     return float(diff @ diff + np.trace(sig1 + sig2 - 2.0 * cov_mean))
@@ -429,7 +434,7 @@ def topology_consistency_score(
       - embedding_mse    : MSE between distribution means (↓ better)
       - embedding_cosine : mean cosine similarity per VNF (↑ better)
 
-    Rationale: the GAT encodes the Clearwater 5G topology structure.
+    Rationale: the GAT encodes the Clearwater topology structure.
     A good synthetic dataset should elicit the same topology embedding
     as the real data, confirming that the learned topological conditioning
     has been preserved during generation.
@@ -483,6 +488,178 @@ def topology_consistency_score(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Metric 6 — Granger Causal Score  (TopoSynth-specific)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _granger_test_ols(
+    y: np.ndarray,
+    x: np.ndarray,
+    max_lag: int,
+    alpha: float,
+) -> bool:
+    """
+    Test H₀: x does not Granger-cause y, using an OLS F-test.
+
+    Restricted:   y_t = a₀ + Σ_{k=1}^p a_k y_{t-k} + ε_t
+    Unrestricted: y_t = a₀ + Σ_{k=1}^p a_k y_{t-k}
+                            + Σ_{k=1}^p b_k x_{t-k} + ε_t
+
+    F = ((RSS_R − RSS_U) / p) / (RSS_U / (n − 2p − 1))
+    where n = len(y) − p (usable observations after lag creation).
+
+    Returns True if H₀ is rejected at level alpha, i.e. x Granger-causes y.
+
+    Reference: Lütkepohl (2005) §2.3.
+    """
+    T     = len(y)
+    p     = max_lag
+    n_obs = T - p     # number of usable observations
+
+    # Need at least one d.f. in the unrestricted residuals
+    if n_obs <= 2 * p + 2:
+        return False
+
+    Y = y[p:].copy()  # [n_obs]
+
+    # Restricted design: intercept + p lags of y
+    Xr = np.empty((n_obs, p + 1))
+    Xr[:, 0] = 1.0
+    for k in range(1, p + 1):
+        Xr[:, k] = y[p - k: T - k]
+
+    # Unrestricted design: intercept + p lags of y + p lags of x
+    Xu = np.empty((n_obs, 2 * p + 1))
+    Xu[:, : p + 1] = Xr
+    for k in range(1, p + 1):
+        Xu[:, p + k] = x[p - k: T - k]
+
+    def _rss(X: np.ndarray, Y: np.ndarray) -> float:
+        beta = np.linalg.lstsq(X, Y, rcond=None)[0]
+        res  = Y - X @ beta
+        return float(res @ res)
+
+    try:
+        rss_r = _rss(Xr, Y)
+        rss_u = _rss(Xu, Y)
+    except np.linalg.LinAlgError:
+        return False
+
+    # Numerical guard: unrestricted RSS must be positive
+    if rss_u < 1e-10:
+        return False
+
+    q   = p                     # number of extra regressors (x lags)
+    df2 = n_obs - (2 * p + 1)  # unrestricted model d.f.
+    F   = ((rss_r - rss_u) / q) / (rss_u / df2)
+
+    if F <= 0:  # RSS_U ≥ RSS_R due to numerical noise — cannot reject H₀
+        return False
+
+    return float(f_dist.sf(F, q, df2)) < alpha
+
+
+def granger_causal_score(
+    real_4d:  np.ndarray,   # [B_r, W, N, F]
+    fake_4d:  np.ndarray,   # [B_f, W, N, F]
+    vnf_names: list,        # ordered list of N VNF names
+    max_lag:  int   = 3,    # maximum Granger lag p  (granger_lag in config)
+    alpha:    float = 0.05, # significance threshold for F-test
+) -> dict:
+    """
+    Granger Causal Score (GCS) — TopoSynth-specific metric.
+
+    Tests whether the directed causal relationships between VNF pairs
+    are preserved in synthetic data.
+
+    For each ordered pair (i, j) with i ≠ j, fits two models on
+    the B-length window-summary time series (mean across W and F per window):
+
+      Restricted:   X_j ~ X_j_lags        (no X_i information)
+      Unrestricted: X_j ~ X_j_lags + X_i_lags
+
+    The F-statistic tests H₀: X_i does not Granger-cause X_j (lags 1..p).
+    Decision: reject H₀ at p < alpha  →  X_i Granger-causes X_j.
+
+    GCS = fraction of N(N−1) directed pairs where real and synthetic
+          agree on the causal decision.
+
+      GCS = 1.0 : perfect preservation of the directed causal graph.
+      GCS = 0.5 : random-agreement baseline.
+
+    Why window-summary time series?
+    --------------------------------
+    Synthetic windows are discrete (not a continuous process), so
+    concatenating them introduces artificial discontinuities.  Using the
+    per-window mean as a single observation yields a clean time series
+    of length B with consistent stationarity assumptions.  The real
+    windows are summarised identically for comparability.
+
+    N(N−1) = 30 pairs tested for the 6-VNF Clearwater topology.
+    """
+    if not HAS_SCIPY:
+        log.warning("scipy unavailable — Granger Causal Score skipped")
+        return {"gcs": float("nan")}
+
+    N = len(vnf_names)
+
+    # Aggregate windows → scalar time series [B, N]
+    # mean over time axis W (dim 1) and feature axis F (dim 3)
+    real_ts = real_4d.mean(axis=(1, 3))   # [B_r, N]
+    fake_ts = fake_4d.mean(axis=(1, 3))   # [B_f, N]
+
+    log.info(f"  GCS: testing {N*(N-1)} directed pairs "
+             f"(max_lag={max_lag}, alpha={alpha}) …")
+    log.info(f"  GCS: real series length = {len(real_ts)}, "
+             f"fake series length = {len(fake_ts)}")
+
+    decisions_real: dict[str, bool] = {}
+    decisions_fake: dict[str, bool] = {}
+
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                continue
+            key = f"{vnf_names[i]}->{vnf_names[j]}"
+            decisions_real[key] = _granger_test_ols(
+                y=real_ts[:, j], x=real_ts[:, i],
+                max_lag=max_lag, alpha=alpha,
+            )
+            decisions_fake[key] = _granger_test_ols(
+                y=fake_ts[:, j], x=fake_ts[:, i],
+                max_lag=max_lag, alpha=alpha,
+            )
+
+    n_pairs  = len(decisions_real)
+    n_agreed = sum(
+        1 for k in decisions_real
+        if decisions_real[k] == decisions_fake[k]
+    )
+    gcs = n_agreed / n_pairs if n_pairs > 0 else float("nan")
+
+    # Per-pair detail for logging and JSON export
+    pair_results = {}
+    for k in decisions_real:
+        r, f = decisions_real[k], decisions_fake[k]
+        pair_results[k] = {
+            "real_causal": r,
+            "fake_causal": f,
+            "agrees":      r == f,
+        }
+        icon = "✓" if r == f else "✗"
+        log.info(f"    {icon} {k:30s}  real={'G-causal' if r else 'indep   '}  "
+                 f"fake={'G-causal' if f else 'indep   '}")
+
+    return {
+        "gcs":          gcs,
+        "n_pairs":      n_pairs,
+        "n_agreed":     n_agreed,
+        "alpha":        alpha,
+        "max_lag":      max_lag,
+        "pair_results": pair_results,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -531,6 +708,9 @@ def main() -> None:
     n_syn          = args.n_syn or eval_cfg.get("n_synthetic", 5000)
     guidance_eta   = train_cfg.get("guidance_eta",   0.1)
     guidance_gamma = train_cfg.get("guidance_gamma", 0.01)
+    granger_lag    = eval_cfg.get("granger_lag",     3)   # from configs/default.yaml
+    n_infer_steps   = eval_cfg.get("n_infer_steps",    50)
+    guidance_every  = eval_cfg.get("guidance_every",    5)
 
     vnf_names = topo_cfg.get("vnfcs", [
         "bono", "sprout", "homestead", "homer", "ralf", "ellis",
@@ -583,6 +763,7 @@ def main() -> None:
         x = model.generate(
             n_samples=n, h_bar=h_bar,
             device=device, eta=guidance_eta, gamma=guidance_gamma,
+            n_infer_steps=n_infer_steps, guidance_every=guidance_every,
         )
         chunks.append(x.cpu())
         if (start // chunk + 1) % 5 == 0:
@@ -598,7 +779,7 @@ def main() -> None:
 
     # ── Metric 1: Discriminative Score ────────────────────────────────────────
     log.info("=" * 60)
-    log.info("Metric 1/5: Discriminative Score (DS)")
+    log.info("Metric 1/6: Discriminative Score (DS)")
     ds = discriminative_score(
         real=test_flat, fake=fake_flat,
         device=device,
@@ -608,7 +789,7 @@ def main() -> None:
 
     # ── Metric 2: Predictive Score (TSTR) ─────────────────────────────────────
     log.info("=" * 60)
-    log.info("Metric 2/5: Predictive Score / TSTR (PS)")
+    log.info("Metric 2/6: Predictive Score / TSTR (PS)")
     ps = predictive_score(
         real=test_flat, fake=fake_flat,
         device=device,
@@ -618,7 +799,7 @@ def main() -> None:
 
     # ── Metric 3: Context-FID ─────────────────────────────────────────────────
     log.info("=" * 60)
-    log.info("Metric 3/5: Context-FID (CFID)")
+    log.info("Metric 3/6: Context-FID (CFID)")
     n_fid = min(2000, len(test_flat), len(fake_flat))
     cfid  = context_fid(
         real=test_flat[rng.choice(len(test_flat), n_fid, replace=False)],
@@ -630,7 +811,7 @@ def main() -> None:
 
     # ── Metric 4: Correlational Score ─────────────────────────────────────────
     log.info("=" * 60)
-    log.info("Metric 4/5: Correlational Score (CS)")
+    log.info("Metric 4/6: Correlational Score (CS)")
     n_cs = min(2000, len(test_flat), len(fake_flat))
     cs   = correlational_score(
         real=test_flat[rng.choice(len(test_flat), n_cs, replace=False)],
@@ -640,7 +821,7 @@ def main() -> None:
 
     # ── Metric 5: Topology Consistency Score ──────────────────────────────────
     log.info("=" * 60)
-    log.info("Metric 5/5: Topology Consistency Score (TCS)")
+    log.info("Metric 5/6: Topology Consistency Score (TCS)")
     n_tcs = min(500, len(test_4d), len(fake_4d))
     tcs   = topology_consistency_score(
         real_4d=test_4d [rng.choice(len(test_4d),  n_tcs, replace=False)],
@@ -654,6 +835,21 @@ def main() -> None:
     for vnf, cos in tcs["per_vnf_cosine"].items():
         log.info(f"      {vnf:12s}: cosine = {cos:.4f}")
 
+    # ── Metric 6: Granger Causal Score ────────────────────────────────────────
+    log.info("=" * 60)
+    log.info(f"Metric 6/6: Granger Causal Score (GCS)  [lag={granger_lag}, α=0.05]")
+    # Use all available windows — GCS benefits from longer time series
+    gcs_result = granger_causal_score(
+        real_4d=test_4d,
+        fake_4d=fake_4d,
+        vnf_names=vnf_names,
+        max_lag=granger_lag,
+        alpha=0.05,
+    )
+    log.info(f"  GCS = {gcs_result['gcs']:.4f}  "
+             f"({gcs_result.get('n_agreed', '?')}/{gcs_result.get('n_pairs', '?')} pairs agree)  "
+             f"(↑ better; 1.0 = perfect causal graph)")
+
     # ── Collect & save results ────────────────────────────────────────────────
     results = {
         "discriminative_score":  ds,
@@ -661,10 +857,12 @@ def main() -> None:
         "context_fid":           cfid,
         "correlational_score":   cs,
         "topology_consistency":  tcs,
+        "granger_causal_score":  gcs_result,
         "meta": {
             "n_syn":          n_syn,
             "n_test_windows": len(test_4d),
             "repeats":        args.repeats,
+            "granger_lag":    granger_lag,
             "device":         str(device),
             "timestamp":      time.strftime("%Y-%m-%dT%H:%M:%S"),
         },
@@ -687,6 +885,8 @@ def main() -> None:
     log.info(f"  Correlational Score   (↓)  {cs:.6f}")
     log.info(f"  Topo Consistency MSE  (↓)  {tcs['embedding_mse']:.6f}")
     log.info(f"  Topo Consistency Cos  (↑)  {tcs['embedding_cosine']:.6f}")
+    log.info(f"  Granger Causal Score  (↑)  {gcs_result['gcs']:.4f}  "
+             f"[lag={granger_lag}]")
     log.info("=" * 60)
 
 

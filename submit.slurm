@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=12          # 4 CPUs per GPU  (3 GPUs × 4 = 12)
 #SBATCH --gres=gpu:3                # 3 × GH200 GPUs
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 

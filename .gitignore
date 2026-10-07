@@ -30,3 +30,6 @@ build/
 .idea/
 .DS_Store
 *.swp
+checkpoints_sfc/
+data/
+experiments_sfc/
